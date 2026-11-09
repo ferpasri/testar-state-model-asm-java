@@ -2,12 +2,8 @@ package org.testar.asm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import org.testar.evidence.EvidenceJson;
 import org.testar.evidence.EvidenceReader;
 import org.testar.evidence.ReconstructedEvidence;
@@ -49,12 +45,6 @@ public final class EvidenceSources {
         }
         JsonNode data = object("runs", runs, "sequences", sequences, "observations", EvidenceJson.tree(evidence.observations()),
             "actions", EvidenceJson.tree(evidence.actionDescriptions()), "executions", executions);
-        try {
-            byte[] bytes = data.toString().getBytes(StandardCharsets.UTF_8);
-            String fingerprint = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            return object("id", sourceId, "label", sourceId, "fingerprint", fingerprint, "evidence", data);
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+        return object("id", sourceId, "label", sourceId, "fingerprint", ContentHash.source(data), "evidence", data);
     }
 }

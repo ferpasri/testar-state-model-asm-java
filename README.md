@@ -32,3 +32,7 @@ The preparation command downloads the release pinned in [compatibility.json](com
 - [Exploration control](src/test/java/org/testar/asm/ExplorationControlTest.java): driver calls, new evidence, switching, and stopping.
 
 The [shared conformance runner](src/test/java/org/testar/asm/SharedConformanceTest.java) verifies every published scenario in normal and reversed collection order. [Specifications](docs/SPEC.md) describe the implementation responsibilities and public interfaces; remaining work is in [TODO](TODO.md).
+
+## Performance comparison
+
+The [Java evidence and ASM benchmark](benchmarks/README.md) measures recording, source preparation, growing model updates, and selection with repeatable GUI trace data. It saves validated traces, models, and timings for before/after comparisons.

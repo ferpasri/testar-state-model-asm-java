@@ -30,7 +30,7 @@ public final class AsmRun {
     private boolean cancelled;
     private List<String> activeExecutionReference;
     private final Map<List<String>, ActionExecutionContext> executionContexts = new HashMap<>();
-    private final Map<String, JsonNode> updates = new HashMap<>();
+    private final Map<String, String> updates = new HashMap<>();
     private final Set<List<String>> counted = new HashSet<>();
     private int asmIndex;
     private long entryCount;
@@ -261,22 +261,22 @@ public final class AsmRun {
     }
 
     /** Hold a checked evidence update until all checks for the calling operation have passed. */
-    private record Prepared(StateModelData stateModelData, boolean changed, JsonNode payload) {
+    private record Prepared(StateModelData stateModelData, boolean changed, String contentHash) {
     }
 
     /** Check incoming evidence without changing the run; repeated update IDs must contain the same data. */
     private Prepared prepareUpdate(String updateId, JsonNode sources, JsonNode selectedRuns) {
         require(updateId != null && !updateId.isBlank(), "invalid_evidence", "An update ID is required.");
-        JsonNode payload = StateModelData.normalize(sources, selectedRuns);
-        require(!updates.containsKey(updateId) || same(updates.get(updateId), payload),
+        PreparedSnapshot prepared = new PreparedSnapshot(sources, selectedRuns, stateModelData);
+        require(!updates.containsKey(updateId) || updates.get(updateId).equals(prepared.contentHash),
             "conflicting_update", "Update ID has different content.");
-        StateModelData candidate = stateModelData.extended(sources, selectedRuns, rules);
-        return new Prepared(candidate, !same(candidate.snapshot, stateModelData.snapshot), payload);
+        StateModelData candidate = stateModelData.extended(prepared, rules);
+        return new Prepared(candidate, candidate != stateModelData, prepared.contentHash);
     }
 
     /** Install checked evidence and invalidate old decisions; retire the observation if newer evidence replaces it. */
     private void acceptUpdate(String updateId, Prepared prepared) {
-        updates.put(updateId, prepared.payload().deepCopy());
+        updates.put(updateId, prepared.contentHash());
         if (!prepared.changed()) {
             return;
         }

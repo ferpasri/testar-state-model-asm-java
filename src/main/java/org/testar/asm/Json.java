@@ -1,6 +1,8 @@
 package org.testar.asm;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
@@ -8,9 +10,11 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
-import org.testar.evidence.EvidenceJson;
 
 final class Json {
+    static final ObjectMapper MAPPER = new ObjectMapper()
+        .enable(DeserializationFeature.USE_BIG_INTEGER_FOR_INTS)
+        .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
     static final Comparator<String> TEXT = (left, right) ->
         Arrays.compare(left.codePoints().toArray(), right.codePoints().toArray());
     static final Comparator<List<String>> KEYS = (left, right) -> {
@@ -31,11 +35,11 @@ final class Json {
         for (int index = 0; index < fields.length; index += 2) {
             values.put((String) fields[index], fields[index + 1]);
         }
-        return (ObjectNode) EvidenceJson.tree(values);
+        return MAPPER.valueToTree(values);
     }
 
     static ArrayNode array(Object value) {
-        return (ArrayNode) EvidenceJson.tree(value);
+        return MAPPER.valueToTree(value);
     }
 
     static List<JsonNode> list(JsonNode node) {
@@ -54,8 +58,11 @@ final class Json {
     }
 
     static boolean same(JsonNode left, JsonNode right) {
+        if (left == right) {
+            return true;
+        }
         if (left == null || right == null) {
-            return left == right;
+            return false;
         }
         if (left.isNumber() && right.isNumber()) {
             return left.decimalValue().compareTo(right.decimalValue()) == 0;

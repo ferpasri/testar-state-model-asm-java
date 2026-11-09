@@ -9,6 +9,7 @@
 - [ ] Connect a Playwright ASM integration and validate complete browser executions.
 - [ ] Add Discovery around known paths after its selection policy and shared cases are specified.
 - [ ] Implement future progress, loop, and retry controls as their shared contract is defined.
-- [ ] Measure model update and route selection costs with larger trace collections.
+- [x] Add a reproducible evidence recording and ASM update benchmark.
+- [ ] Measure route selection with branching models and larger trace collections.
 - [ ] Publish dependencies and this library through the selected package distribution channel.
 - [ ] Add CI installation once the dependency distribution is reproducible for fresh runners.

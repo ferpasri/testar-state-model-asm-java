@@ -24,6 +24,8 @@ Execution counts retain the evidence statuses. Failed attempts count as visited;
 
 Updates preserve accepted facts and count identical records once. Decisions are tied to an observation and ASM data revision. An invalid operation leaves accepted state-model data unchanged. Decisions and returned models are independent copies. Calls that change or inspect run state are serialized within that run.
 
+When traces grow, the library compares incoming records with accepted records and reuses unchanged data. It validates new records against the accepted execution history. Historical insertions that change lifecycle order receive a full lifecycle check. Unchanged updates reuse the current model; changed updates rebuild the abstract model. Update IDs retain compact content hashes for retry checks.
+
 ## Exploration entry point
 
 The library requests observation and action discovery, selects, requests execution, accepts the resulting evidence, and repeats. The exploration driver records actual interactions through its evidence adapter and library.

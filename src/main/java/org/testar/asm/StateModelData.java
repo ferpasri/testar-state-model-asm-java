@@ -27,6 +27,8 @@ final class StateModelData {
         "awaiting_execution_result", "awaiting_resulting_observation");
     static final Set<String> PENDING = Set.of("awaiting_execution_result", "awaiting_resulting_observation");
     final JsonNode snapshot;
+    final Map<PreparedSnapshot.RecordKey, PreparedSnapshot.RecordContent> records;
+    final Map<String, SourceValidation> validations = new HashMap<>();
     final JsonNode model;
     final Map<String, JsonNode> sources = new LinkedHashMap<>();
     final Set<List<String>> runs = new HashSet<>();
@@ -37,11 +39,19 @@ final class StateModelData {
 
     /** Validate trace data, index records from selected runs, and build their abstract model. */
     StateModelData(JsonNode inputSources, JsonNode selectedRuns, JsonNode rules) {
+        this(new PreparedSnapshot(inputSources, selectedRuns, null), rules, null);
+    }
+
+    /** Build candidate data separately, preserving accepted data if any check fails. */
+    private StateModelData(PreparedSnapshot prepared, JsonNode rules, StateModelData previous) {
         try {
-            snapshot = normalize(inputSources, selectedRuns);
+            snapshot = prepared.snapshot;
+            records = prepared.records;
+            JsonNode selectedRuns = snapshot.get("selected_runs");
             for (JsonNode source : snapshot.get("sources")) {
                 require(sources.put(text(source, "id"), source) == null, "invalid_evidence", "Repeated source identity.");
-                validateSource(source);
+                SourceValidation old = previous == null ? null : previous.validations.get(text(source, "id"));
+                validations.put(text(source, "id"), validateSource(source, old));
             }
             for (JsonNode reference : selectedRuns) {
                 var runKey = List.of(text(reference, "source"), text(reference, "run"));
@@ -80,25 +90,6 @@ final class StateModelData {
         }
     }
 
-    /** Order copied records consistently so a different input order does not look like new evidence. */
-    static JsonNode normalize(JsonNode sourceArray, JsonNode selectedRuns) {
-        var ordered = new ArrayList<JsonNode>();
-        for (JsonNode source : list(sourceArray)) {
-            ObjectNode copy = source.deepCopy();
-            copy.get("evidence").fields().forEachRemaining(entry -> {
-                List<JsonNode> records = list(entry.getValue());
-                records.sort(Comparator.comparing(item -> item.has("id") ? text(item, "id") :
-                    text(item.get("execution"), "id"), TEXT));
-                ((ObjectNode) copy.get("evidence")).set(entry.getKey(), array(records));
-            });
-            ordered.add(copy);
-        }
-        ordered.sort(Comparator.comparing(item -> text(item, "id"), TEXT));
-        List<JsonNode> selected = list(selectedRuns);
-        selected.sort(Comparator.comparing(item -> List.of(text(item, "source"), text(item, "run")), KEYS));
-        return object("sources", ordered, "selected_runs", selected);
-    }
-
     /** Separate the original run or sequence description from its later completion information. */
     private static ObjectNode withoutLifecycle(JsonNode record) {
         ObjectNode result = record.deepCopy();
@@ -109,14 +100,12 @@ final class StateModelData {
     /** Check source records through temporary in-memory Evidence Events; these events are never written to traces. */
     private static final class Validator {
         final ReconstructedEvidence history;
-        int events;
-
-        Validator(String id) {
-            history = new ReconstructedEvidence(new Manifest(id));
+        Validator(ReconstructedEvidence history) {
+            this.history = history;
         }
 
         void apply(String type, JsonNode data) {
-            JsonNode event = object("schema_version", 3, "id", Integer.toString(++events),
+            JsonNode event = object("schema_version", 3, "id", Integer.toString(history.eventCount() + 1),
                 "event", object("event_type", type, "data", data));
             history.apply(EvidenceJson.readEvent(event.toString()));
         }
@@ -127,54 +116,95 @@ final class StateModelData {
         return record.path("reason").isTextual() ? text(record, "reason") : "Reconstructed lifecycle finished";
     }
 
-    /** Check that states, actions, execution results, and transitions form a valid evidence history. */
-    private static void validateSource(JsonNode source) {
-        JsonNode evidence = source.get("evidence");
-        Validator validator = new Validator(text(source, "id"));
-        for (JsonNode action : evidence.get("actions")) {
-            validator.apply("action_described", action);
+    private record PlannedEvent(String type, JsonNode data) {
+    }
+
+    private record SourceValidation(ReconstructedEvidence history, List<PlannedEvent> events, Set<String> actionIds) {
+    }
+
+    /** Collect lifecycle order using references to owned records, without copying widgets. */
+    private static final class Planner {
+        final List<PlannedEvent> events = new ArrayList<>();
+
+        void add(String type, JsonNode data) {
+            events.add(new PlannedEvent(type, data));
         }
+    }
+
+    /** Check that states, actions, execution results, and transitions form a valid evidence history. */
+    private static SourceValidation validateSource(JsonNode source, SourceValidation previous) {
+        JsonNode evidence = source.get("evidence");
+        Planner plan = new Planner();
         for (JsonNode run : evidence.get("runs")) {
-            validator.apply("test_run_started", withoutLifecycle(run));
+            plan.add("test_run_started", withoutLifecycle(run));
             List<JsonNode> sequences = list(evidence.get("sequences")).stream()
                 .filter(item -> text(item, "test_run").equals(text(run, "id")))
                 .sorted(Comparator.comparing(item -> item.path("sequence_index").bigIntegerValue())).toList();
             for (JsonNode sequence : sequences) {
-                validator.apply("test_sequence_started", withoutLifecycle(sequence));
+                plan.add("test_sequence_started", withoutLifecycle(sequence));
                 List<JsonNode> observations = list(evidence.get("observations")).stream()
                     .filter(item -> text(item, "test_sequence").equals(text(sequence, "id")))
                     .sorted(Comparator.comparing(item -> item.path("observation_index").bigIntegerValue())).toList();
                 List<JsonNode> records = list(evidence.get("executions")).stream()
                     .filter(item -> text(item.get("execution"), "test_sequence").equals(text(sequence, "id"))).toList();
                 for (JsonNode observation : observations) {
-                    validator.apply("observation_recorded", observation);
+                    plan.add("observation_recorded", observation);
                     for (JsonNode record : records) {
                         if (text(record, "resultingObservation").equals(text(observation, "id"))) {
-                            validator.apply("transition_recorded", object("action_execution", record.get("execution").get("id"),
+                            plan.add("transition_recorded", object("action_execution", record.get("execution").get("id"),
                                 "resulting_observation", observation.get("id")));
                         }
                     }
                     for (JsonNode record : records) {
                         if (text(record.get("execution"), "source_observation").equals(text(observation, "id"))) {
-                            validator.apply("action_selected", record.get("execution"));
+                            plan.add("action_selected", record.get("execution"));
                             if (!record.get("executionResult").isNull()) {
-                                validator.apply("action_execution_reported", record.get("executionResult"));
+                                plan.add("action_execution_reported", record.get("executionResult"));
                             }
                         }
                     }
                 }
                 if (text(sequence, "status").equals("finished")) {
-                    validator.apply("test_sequence_finished", object("test_sequence", sequence.get("id"), "reason", finishReason(sequence)));
+                    plan.add("test_sequence_finished", object("test_sequence", sequence.get("id"), "reason", finishReason(sequence)));
                 } else {
                     require(text(sequence, "status").equals("running"), "invalid_evidence", "Unknown sequence status.");
                 }
             }
             if (text(run, "status").equals("finished")) {
-                validator.apply("test_run_finished", object("test_run", run.get("id"), "reason", finishReason(run)));
+                plan.add("test_run_finished", object("test_run", run.get("id"), "reason", finishReason(run)));
             } else {
                 require(text(run, "status").equals("running"), "invalid_evidence", "Unknown run status.");
             }
         }
+        boolean extendsHistory = previous != null && plan.events.size() >= previous.events().size();
+        if (extendsHistory) {
+            for (int index = 0; index < previous.events().size(); index++) {
+                PlannedEvent before = previous.events().get(index);
+                PlannedEvent after = plan.events.get(index);
+                extendsHistory &= before.type().equals(after.type()) && same(before.data(), after.data());
+            }
+        }
+        Set<String> actionIds = new HashSet<>();
+        List<JsonNode> newActions = new ArrayList<>();
+        for (JsonNode action : evidence.get("actions")) {
+            actionIds.add(text(action, "id"));
+            if (!extendsHistory || !previous.actionIds().contains(text(action, "id"))) {
+                newActions.add(action);
+            }
+        }
+        boolean unchanged = extendsHistory && newActions.isEmpty() && plan.events.size() == previous.events().size();
+        ReconstructedEvidence history = unchanged ? previous.history() : extendsHistory
+            ? previous.history().snapshot() : new ReconstructedEvidence(new Manifest(text(source, "id")));
+        Validator validator = new Validator(history);
+        for (JsonNode action : newActions) {
+            validator.apply("action_described", action);
+        }
+        int acceptedEvents = extendsHistory ? previous.events().size() : 0;
+        for (PlannedEvent event : plan.events.subList(acceptedEvents, plan.events.size())) {
+            validator.apply(event.type(), event.data());
+        }
+        // Check summaries even for an unchanged plan: unsupported status changes
+        // and observations outside all sequences must still be rejected.
         require(validator.history.observations().size() == evidence.get("observations").size() &&
             validator.history.testSequences().size() == evidence.get("sequences").size() &&
             validator.history.actionExecutions().size() == evidence.get("executions").size(),
@@ -184,10 +214,13 @@ final class StateModelData {
             String status = actual.status().name().toLowerCase(java.util.Locale.ROOT);
             require(status.equals(text(record, "status")), "invalid_evidence", "Execution status disagrees with lifecycle.");
         }
+        return unchanged ? previous : new SourceValidation(history, List.copyOf(plan.events), Set.copyOf(actionIds));
     }
 
     /** Accept additional evidence while preserving existing facts; reuse this model if the data has not changed. */
-    StateModelData extended(JsonNode newSources, JsonNode selectedRuns, JsonNode rules) {
+    StateModelData extended(PreparedSnapshot prepared, JsonNode rules) {
+        JsonNode newSources = prepared.snapshot.get("sources");
+        JsonNode selectedRuns = prepared.snapshot.get("selected_runs");
         Set<List<String>> selected = new HashSet<>();
         selectedRuns.forEach(item -> selected.add(List.of(text(item, "source"), text(item, "run"))));
         require(selected.containsAll(runs), "conflicting_evidence", "Selected runs cannot be removed.");
@@ -203,11 +236,19 @@ final class StateModelData {
             }
             merged.put(text(source, "id"), source);
         }
-        JsonNode candidate = normalize(array(merged.values()), selectedRuns);
+        List<JsonNode> ordered = new ArrayList<>(merged.values());
+        ordered.sort(Comparator.comparing(item -> text(item, "id"), TEXT));
+        ObjectNode candidate = MAPPER.createObjectNode();
+        candidate.set("sources", MAPPER.createArrayNode().addAll(ordered));
+        candidate.set("selected_runs", selectedRuns);
         if (same(candidate, snapshot)) {
             return this;
         }
-        return new StateModelData(candidate.get("sources"), candidate.get("selected_runs"), rules);
+        Map<PreparedSnapshot.RecordKey, PreparedSnapshot.RecordContent> incoming = new HashMap<>(prepared.records);
+        prepared.records.putAll(records);
+        prepared.records.putAll(incoming);
+        prepared.snapshot = candidate;
+        return new StateModelData(prepared, rules, this);
     }
 
     /** Allow new records and execution progress while rejecting changes to facts already accepted. */
